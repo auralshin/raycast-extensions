@@ -3,15 +3,7 @@ import { getPreferenceValues } from "@raycast/api";
 import { getChain, registerCustomChains, type CustomChainInput } from "./chains";
 import type { DecodeConfig } from "./evm";
 
-type Preferences = {
-  etherscanApiKey?: string;
-  defaultChain?: string;
-  customChainId?: string;
-  rpcUrl?: string;
-  customChains?: string;
-  solanaRpc?: string;
-  solanaCluster?: string;
-};
+// `Preferences` is auto-generated in raycast-env.d.ts from package.json.
 
 function parseCustomChains(raw?: string): CustomChainInput[] {
   if (!raw?.trim()) return [];

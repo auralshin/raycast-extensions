@@ -68,7 +68,9 @@ async function main() {
       const jup = r?.instructions.find((i) => i.programId === JUPITER);
       check("Jupiter instruction present", !!jup, JSON.stringify(jup?.summary));
       check("decoded via Anchor IDL", jup?.source === "anchor IDL", `source=${jup?.source}`);
-      check("Anchor decode yielded named args", (jup?.args.length ?? 0) > 0, `${jup?.args.length} args`);
+      // some Jupiter instructions (e.g. setTokenLedger) take no args; assert names are real when present
+      const argsNamed = !jup?.args.length || jup.args.every((a) => a.name && !/^arg\d+$/.test(a.name));
+      check("Anchor args are named when present", argsNamed, JSON.stringify(jup?.args.map((a) => a.name)));
       if (jup) console.log(`    ↳ ${jup.program}.${jup.summary}(${jup.args.map((a) => a.name).join(", ")})`);
     }
   } catch (e) {
