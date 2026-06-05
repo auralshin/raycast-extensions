@@ -20,7 +20,7 @@ import {
 } from "viem";
 import type { AbiError } from "abitype";
 import { normalize } from "viem/ens";
-import { getChain, MAINNET } from "./chains";
+import { CHAINS, getChain, MAINNET } from "./chains";
 
 // EIP-1967 storage slots (keccak256("eip1967.proxy.{implementation,beacon}") - 1).
 const EIP1967_IMPL_SLOT: Hex = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
@@ -100,6 +100,9 @@ export type MultisigInfo = {
   nonce?: string;
 };
 
+// Where an address is a contract on a chain other than the selected one.
+export type ChainPresence = { chainId: number; name: string; multisig: MultisigInfo | null };
+
 export type DecodedError = {
   kind: "Error" | "Panic" | "custom" | "raw";
   name: string;
@@ -111,6 +114,7 @@ export type DecodedError = {
 export type TxInfo = { hash: Hex; from: Address; to: Address | null; value: bigint; input: Hex };
 
 export type TxReport = {
+  chainId: number; // the chain the tx was actually found on (may differ from the selected chain)
   hash: Hex;
   from: Address;
   to: Address | null;
@@ -769,7 +773,32 @@ export async function fetchTransaction(cfg: DecodeConfig, hash: Hex): Promise<Tx
   }
 }
 
+// Find which other common chain a tx hash exists on (probed only when it's not on the selected chain).
+async function findTxChain(currentChainId: number, hash: Hex): Promise<number | null> {
+  const others = Object.values(CHAINS).filter((c) => c.id !== currentChainId);
+  const checks = await Promise.all(
+    others.map(async (c) => {
+      try {
+        await makeClient(c.id).getTransaction({ hash });
+        return c.id;
+      } catch {
+        return null;
+      }
+    }),
+  );
+  return checks.find((id): id is number => id !== null) ?? null;
+}
+
 export async function analyzeTransaction(cfg: DecodeConfig, hash: Hex): Promise<TxReport | null> {
+  const onSelected = await analyzeTxOnChain(cfg, hash);
+  if (onSelected) return onSelected;
+  // Not on the selected chain — find where it actually is and decode there.
+  const otherChain = await findTxChain(cfg.chainId, hash);
+  if (otherChain == null) return null;
+  return analyzeTxOnChain({ chainId: otherChain, etherscanApiKey: cfg.etherscanApiKey }, hash);
+}
+
+async function analyzeTxOnChain(cfg: DecodeConfig, hash: Hex): Promise<TxReport | null> {
   const ctx = makeCtx(cfg);
   let tx;
   try {
@@ -800,6 +829,7 @@ export async function analyzeTransaction(cfg: DecodeConfig, hash: Hex): Promise<
       : null;
 
   return {
+    chainId: cfg.chainId,
     hash,
     from: tx.from,
     to: tx.to,
@@ -840,6 +870,25 @@ async function readMultisig(client: Client, address: Address): Promise<MultisigI
   }
 }
 
+// When an address has no code on the selected chain, look for it on the other
+// common chains so a contract/Safe deployed elsewhere isn't missed.
+async function probeOtherChains(currentChainId: number, address: Address): Promise<ChainPresence[]> {
+  const others = Object.values(CHAINS).filter((c) => c.id !== currentChainId);
+  const found = await Promise.all(
+    others.map(async (c) => {
+      try {
+        const client = makeClient(c.id);
+        const code = await client.getCode({ address }).catch(() => undefined);
+        if (!code || code === "0x") return null;
+        return { chainId: c.id, name: c.name, multisig: await readMultisig(client, address) };
+      } catch {
+        return null;
+      }
+    }),
+  );
+  return found.filter((c): c is ChainPresence => c !== null);
+}
+
 export async function analyzeAddress(
   cfg: DecodeConfig,
   address: Address,
@@ -849,6 +898,7 @@ export async function analyzeAddress(
   isContract: boolean;
   proxy: ProxyInfo | null;
   multisig: MultisigInfo | null;
+  otherChains: ChainPresence[];
 }> {
   const checksum = getAddress(address);
   const ctx = makeCtx(cfg);
@@ -859,5 +909,7 @@ export async function analyzeAddress(
   ]);
   const isContract = !!code && code !== "0x";
   const multisig = isContract ? await readMultisig(ctx.client, checksum) : null;
-  return { checksum, ens, isContract, proxy, multisig };
+  // Only probe elsewhere when it's an EOA here (a contract here is already the answer).
+  const otherChains = isContract ? [] : await probeOtherChains(cfg.chainId, checksum);
+  return { checksum, ens, isContract, proxy, multisig, otherChains };
 }

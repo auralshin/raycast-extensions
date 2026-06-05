@@ -41,6 +41,10 @@ export function nativeSymbol(chainId: number): string {
   return getChain(chainId).chain.nativeCurrency.symbol;
 }
 
+export function chainName(chainId: number): string {
+  return getChain(chainId).name;
+}
+
 export function getSolanaConfig(): { rpc: string; cluster: string } {
   const prefs = getPreferenceValues<Preferences>();
   return {

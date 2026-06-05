@@ -31,6 +31,7 @@ import {
   decodeWithCustomAbi,
   parseAbiText,
   resolveEnsName,
+  type ChainPresence,
   type DecodedCall,
   type DecodedError,
   type DecodedLog,
@@ -39,7 +40,7 @@ import {
   type ProxyInfo,
   type TxReport,
 } from "./lib/evm";
-import { explorerUrl, getConfig, getSolanaConfig, nativeSymbol, solscanUrl } from "./lib/prefs";
+import { chainName, explorerUrl, getConfig, getSolanaConfig, nativeSymbol, solscanUrl } from "./lib/prefs";
 import {
   analyzeSolanaAddress,
   analyzeSolanaTransaction,
@@ -109,6 +110,7 @@ type Analysis =
       isContract: boolean;
       proxy: ProxyInfo | null;
       multisig: MultisigInfo | null;
+      otherChains: ChainPresence[];
     }
   | { type: "ensName"; address: Address | null }
   | { type: "tx"; report: TxReport }
@@ -842,9 +844,13 @@ function TxView({ report, cfg }: { report: TxReport; cfg: ReturnType<typeof getC
       : report.status === "reverted"
         ? { text: "Reverted", color: Color.Red }
         : undefined;
+  const cid = report.chainId; // the chain it was actually found on
   return (
     <>
-      <List.Section title="Transaction">
+      <List.Section
+        title="Transaction"
+        subtitle={cid === cfg.chainId ? chainName(cid) : `${chainName(cid)} · auto-detected`}
+      >
         <CopyRow
           id="status"
           icon={
@@ -872,7 +878,7 @@ function TxView({ report, cfg }: { report: TxReport; cfg: ReturnType<typeof getC
             icon={Icon.Box}
             title={`${report.blockNumber.toString()}${report.timestamp ? `  ·  ${new Date(report.timestamp * 1000).toUTCString()}` : ""}`}
             subtitle="block"
-            url={explorerUrl(cfg.chainId, `block/${report.blockNumber.toString()}`)}
+            url={explorerUrl(cid, `block/${report.blockNumber.toString()}`)}
             copy={report.blockNumber.toString()}
           />
         ) : null}
@@ -881,7 +887,7 @@ function TxView({ report, cfg }: { report: TxReport; cfg: ReturnType<typeof getC
           icon={Icon.Person}
           title={report.from}
           subtitle="from"
-          url={explorerUrl(cfg.chainId, `address/${report.from}`)}
+          url={explorerUrl(cid, `address/${report.from}`)}
           copy={report.from}
         />
         {report.to ? (
@@ -890,7 +896,7 @@ function TxView({ report, cfg }: { report: TxReport; cfg: ReturnType<typeof getC
             icon={Icon.ArrowRight}
             title={report.to}
             subtitle="to"
-            url={explorerUrl(cfg.chainId, `address/${report.to}`)}
+            url={explorerUrl(cid, `address/${report.to}`)}
             copy={report.to}
           />
         ) : (
@@ -899,7 +905,7 @@ function TxView({ report, cfg }: { report: TxReport; cfg: ReturnType<typeof getC
         <CopyRow
           id="value"
           icon={Icon.Coins}
-          title={`${formatEther(report.value)} ${nativeSymbol(cfg.chainId)}`}
+          title={`${formatEther(report.value)} ${nativeSymbol(cid)}`}
           subtitle="value"
           copy={formatEther(report.value)}
         />
@@ -908,12 +914,12 @@ function TxView({ report, cfg }: { report: TxReport; cfg: ReturnType<typeof getC
           icon={Icon.Link}
           title={report.hash}
           subtitle="tx hash"
-          url={explorerUrl(cfg.chainId, `tx/${report.hash}`)}
+          url={explorerUrl(cid, `tx/${report.hash}`)}
           copy={report.hash}
         />
       </List.Section>
       {report.revert ? <RevertSection revert={report.revert} /> : null}
-      {report.proxy ? <ProxySection proxy={report.proxy} cfg={cfg} /> : null}
+      {report.proxy ? <ProxySection proxy={report.proxy} cfg={{ ...cfg, chainId: cid }} /> : null}
       {report.decoded ? (
         <>
           <DecodedCallSection decoded={report.decoded} />
@@ -932,7 +938,7 @@ function TxView({ report, cfg }: { report: TxReport; cfg: ReturnType<typeof getC
           />
         </List.Section>
       ) : null}
-      <LogsSection logs={report.logs} cfg={cfg} />
+      <LogsSection logs={report.logs} cfg={{ ...cfg, chainId: cid }} />
     </>
   );
 }
@@ -968,8 +974,25 @@ function AddressView({ a, cfg }: { a: Extract<Analysis, { type: "address" }>; cf
         />
         {a.ens ? <CopyRow id="ens" icon={Icon.Globe} title={a.ens} subtitle="ENS (reverse)" copy={a.ens} /> : null}
       </List.Section>
-      {a.multisig ? <MultisigSection ms={a.multisig} cfg={cfg} /> : null}
+      {a.multisig ? <MultisigSection ms={a.multisig} chainId={cfg.chainId} /> : null}
       {a.proxy ? <ProxySection proxy={a.proxy} cfg={cfg} /> : null}
+      {a.otherChains.map((c) =>
+        c.multisig ? (
+          <MultisigSection key={c.chainId} ms={c.multisig} chainId={c.chainId} chainLabel={c.name} />
+        ) : (
+          <List.Section key={c.chainId} title="Found on other chains">
+            <CopyRow
+              id={`contract-${c.chainId}`}
+              icon={{ source: Icon.Link, tintColor: Color.Blue }}
+              title="Contract"
+              subtitle={`deployed on ${c.name}`}
+              tag={{ text: c.name, color: Color.Blue }}
+              url={explorerUrl(c.chainId, `address/${a.checksum}`)}
+              copy={a.checksum}
+            />
+          </List.Section>
+        ),
+      )}
     </>
   );
 }
@@ -979,14 +1002,15 @@ function multisigMarkdown(ms: MultisigInfo): string {
   return `## ${ms.kind}\n\n**${ms.threshold} of ${ms.owners.length}** signatures required to execute\n\n**Signers (${ms.owners.length})**\n${signers}${ms.nonce != null ? `\n\nnonce: ${ms.nonce}` : ""}`;
 }
 
-function MultisigSection({ ms, cfg }: { ms: MultisigInfo; cfg: ReturnType<typeof getConfig> }) {
+function MultisigSection({ ms, chainId, chainLabel }: { ms: MultisigInfo; chainId: number; chainLabel?: string }) {
+  const rid = (s: string) => `ms-${chainId}-${s}`; // unique across chains
   return (
-    <List.Section title="Multisig" subtitle={ms.kind}>
+    <List.Section title="Multisig" subtitle={chainLabel ? `${ms.kind} · ${chainLabel}` : ms.kind}>
       <CopyRow
-        id="ms-threshold"
+        id={rid("threshold")}
         icon={{ source: Icon.Shield, tintColor: Color.Green }}
         title={`${ms.threshold} of ${ms.owners.length}`}
-        subtitle="threshold — signers required to execute"
+        subtitle={chainLabel ? `threshold · on ${chainLabel}` : "threshold — signers required to execute"}
         tag={{ text: ms.kind, color: Color.Green }}
         copy={`${ms.threshold}/${ms.owners.length}`}
         detail={multisigMarkdown(ms)}
@@ -994,16 +1018,16 @@ function MultisigSection({ ms, cfg }: { ms: MultisigInfo; cfg: ReturnType<typeof
       {ms.owners.map((o, i) => (
         <CopyRow
           key={o}
-          id={`owner-${i}`}
+          id={rid(`owner-${i}`)}
           icon={Icon.Person}
           title={o}
           subtitle={`signer ${i + 1} of ${ms.owners.length}`}
-          url={explorerUrl(cfg.chainId, `address/${o}`)}
+          url={explorerUrl(chainId, `address/${o}`)}
           copy={o}
         />
       ))}
       {ms.nonce != null ? (
-        <CopyRow id="ms-nonce" icon={Icon.Hashtag} title={ms.nonce} subtitle="nonce" copy={ms.nonce} />
+        <CopyRow id={rid("nonce")} icon={Icon.Hashtag} title={ms.nonce} subtitle="nonce" copy={ms.nonce} />
       ) : null}
     </List.Section>
   );

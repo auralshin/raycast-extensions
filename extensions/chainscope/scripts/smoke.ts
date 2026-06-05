@@ -95,6 +95,31 @@ async function main() {
     console.log(`  (skipped, network error: ${(e as Error).message})`);
   }
 
+  console.log("\n[cross-chain tx — hash on a non-default chain (network)]");
+  try {
+    // pull a real recent BNB Chain tx, then decode it with Ethereum selected — it should find it on BNB.
+    const bnbRpc = async (method: string, params: unknown[]) => {
+      const res = await fetch("https://bsc-rpc.publicnode.com", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      });
+      return (await res.json()).result;
+    };
+    const head = await bnbRpc("eth_blockNumber", []);
+    const blk = await bnbRpc("eth_getBlockByNumber", ["0x" + (parseInt(head, 16) - 6).toString(16), false]);
+    const bnbTx = blk.transactions[0] as `0x${string}`;
+    check("got a real BNB tx", !!bnbTx);
+    if (bnbTx) {
+      const report = await analyzeTransaction({ chainId: 1 }, bnbTx); // Ethereum selected
+      check("tx found despite wrong default chain", !!report, "null report");
+      check("resolved to BNB Chain (id 56)", report?.chainId === 56, `chainId=${report?.chainId}`);
+      if (report) console.log(`    ↳ ${bnbTx.slice(0, 12)}… found on chain ${report.chainId}, status ${report.status}`);
+    }
+  } catch (e) {
+    console.log(`  (skipped, network error: ${(e as Error).message})`);
+  }
+
   console.log("\n[ENS reverse (network)]");
   try {
     const name = await reverseEns(VITALIK as `0x${string}`);
